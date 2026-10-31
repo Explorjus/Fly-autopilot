@@ -7,6 +7,7 @@ class XPlane:
 
     def __init__(self, ip, port=49000, timeout=1.0):
         self.adres = (ip, port)
+        self.timeout = timeout                  # <- dopisz tę linię
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.settimeout(timeout)
         self.nazwy = {}      # Twój numer -> nazwa datarefu
@@ -40,3 +41,23 @@ class XPlane:
             paczka = struct.pack("<4sxii400s", b"RREF", 0, numer, dataref.encode())
             self.sock.sendto(paczka, self.adres)
         self.sock.close()
+    
+    def odbierz(self):
+        """Odbiera wszystkie zaległe paczki; w słowniku zostają najnowsze wartości."""
+        pakiety = [self.sock.recvfrom(2048)[0]]    # czekaj na co najmniej jedną
+        self.sock.setblocking(False)
+        try:
+            while True:
+                pakiety.append(self.sock.recvfrom(2048)[0])
+        except BlockingIOError:
+            pass
+        finally:
+            self.sock.settimeout(self.timeout)
+
+        for dane in pakiety:
+            if dane[:4] == b"RREF":
+                for i in range(5, len(dane), 8):
+                    numer, wartosc = struct.unpack("<if", dane[i:i + 8])
+                    if numer in self.nazwy:
+                        self.wartosci[self.nazwy[numer]] = wartosc
+        return self.wartosci

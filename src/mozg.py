@@ -21,7 +21,7 @@ class Mozg:
         self.dt = dt
         self.rng = np.random.default_rng(seed)
         self.reset()
-
+    
     @classmethod
     def z_plikow(cls, folder, **kwargs):
         """Buduje mózg z plików neurony.csv i podsiec.csv."""
@@ -30,13 +30,20 @@ class Mozg:
 
         indeks = {b: i for i, b in enumerate(neurony["bodyId"])}
         N = len(neurony)
+
+        # znak neuronu wysyłającego: +1 pobudza, -1 hamuje (zasada Dale'a)
+        if "znak" in neurony.columns:
+            znaki = neurony["znak"].to_numpy()
+        else:
+            znaki = np.ones(N)
+
         W = np.zeros((N, N))
         for pre, post, w in polaczenia[["body_pre", "body_post", "weight"]].itertuples(index=False):
-            W[indeks[post], indeks[pre]] = w
+            W[indeks[post], indeks[pre]] = w * znaki[indeks[pre]]
 
         nazwy = neurony["type"] + "_" + neurony["somaSide"]
         return cls(W, nazwy, **kwargs)
-
+    
     def reset(self):
         """Ustawia wszystkie neurony w stan spoczynku."""
         self.v = np.full(self.N, self.V_SPOCZ)
