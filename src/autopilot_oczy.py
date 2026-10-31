@@ -9,7 +9,7 @@ from oczy import Oczy
 from xplane import XPlane
 
 THETA = "sim/flightmodel/position/theta"
-AGL = "sim/flightmodel/position/y_agl"      # wysokość nad terenem: podgląd + siatka bezpieczeństwa
+AGL = "sim/flightmodel/position/y_agl"      # wysokość nad terenem - TYLKO do podglądu
 WOLANT_PITCH = "sim/joystick/yoke_pitch_ratio"
 PRZEJECIE_PITCH = "sim/operation/override/override_joystick_pitch"
 
@@ -26,12 +26,13 @@ BAZA_PION = 50.0            # OCG02b + OCG03 (pochylenie)
 HZ_NA_CIEMNOSC_PION = 300.0
 
 # --- narastanie obrazu (LC4 / LPLC2) ---
-ROZMIAR_PLAMKI = 4          # plamka 4x4 piksele = pole widzenia jednego neuronu
-PROG_SZUMU = 0.05           # poniżej tej dywergencji plamka "nie rośnie"
-DYWERGENCJA_PELNA = 0.07    # o tyle ponad próg = neuron strzela z pełną siłą
+ROZMIAR_PLAMKI = 4          # co 4 piksele środek pola widzenia jednego neuronu (siatka 8x16)
+RAMIE = 3                   # długość "ramienia" LPLC2 w pikselach (w każdą z 4 stron)
+PROG_SZUMU = 0.03           # ruch na zewnątrz słabszy niż to [piksel/klatkę] = cisza
+ROZCHODZENIE_PELNE = 0.10   # o tyle ponad próg = neuron strzela z pełną siłą
 HZ_LOOM_MAKS = 70.0
+CZESC_DO_LOOMINGU = 1.0     # neurony patrzą na cały obraz (detektor sam ignoruje przesuwającą się ziemię)
 PROG_RUCHU_WLASNEGO = 0.6   # przy takim obrocie całego obrazu narastanie jest całkiem wyciszone
-CZESC_DO_LOOMINGU = 0.67    # neurony LC4/LPLC2 patrzą tylko na górne 2/3 obrazu (bez ziemi pod samolotem)
 
 # --- wyjścia (stery) ---
 WYGLADZANIE = 0.1
@@ -40,14 +41,14 @@ KIERUNEK = -1
 STERUJ_POCHYLENIEM = True
 WZMOCNIENIE_PITCH = 1 / 150  # ster wys.: człon D z sumy DNp20
 KIERUNEK_PITCH = -1
-WZMOCNIENIE_P19 = 1 / 150     # ster wys.: człon P z sumy DNp19
+WZMOCNIENIE_P19 = 1 / 150    # ster wys.: człon P z sumy DNp19
 KIERUNEK_P19 = +1
 MAKS_PCHANIE = 0.4           # muszka nigdy nie pcha wolantu mocniej niż -0.4
 MAKS_LOTKI = 0.5             # muszka nigdy nie wychyla lotek bardziej niż na pół
 
 # --- odruch ucieczki (Giant Fiber) ---
 WYGLADZANIE_GF = 0.15        # kompromis: szum nie odpala, a reakcja nie jest zbyt opóźniona
-PROG_GF = 450.0             # suma L+P Giant Fibera, powyżej której muszka ucieka
+PROG_GF = 400.0              # suma L+P Giant Fibera, powyżej której muszka ucieka
 SILA_UCIECZKI = 0.5          # minimalne "ciągnij" podczas ucieczki
 CZAS_UCIECZKI = 1.5          # ile sekund trwa ucieczka (stały czas, bez przedłużania)
 MNOZNIK_LOTEK_UCIECZKI = 1.0 # w ucieczce lotki działają normalnie
@@ -56,7 +57,7 @@ CZAS_PO_UCIECZCE = 3.0       # tyle sekund po ucieczce muszka nie pcha wolantu
 REFRAKCJA_UCIECZKI = 1.0     # tyle sekund po powrocie do lotu odruch nie może odpalić ponownie
 
 # --- siatka bezpieczeństwa (NIE biologia - dane z X-Plane, jak GPWS w prawdziwym samolocie) ---
-SIATKA_BEZPIECZENSTWA = True
+SIATKA_BEZPIECZENSTWA = False
 MIN_WYSOKOSC = 60.0          # poniżej tej wysokości nad terenem [m] ucieczka odpala zawsze
 
 # --- podgląd ---
@@ -84,24 +85,33 @@ def ruch_obrazu(poprzednia, klatka):
     return obrot, pion, ruch
 
 
-def dywergencja(ruch):
-    """Mapa 'rozciągania się' obrazu: dodatnia = coś się zbliża."""
-    dx, dy = ruch[..., 0], ruch[..., 1]
-    return np.gradient(dx, axis=1) + np.gradient(dy, axis=0)
+def lplc2(ruch):
+    """Detektor jak neuron LPLC2: ruch na zewnątrz we WSZYSTKICH 4 kierunkach od środka pola.
 
+    Zwraca siatkę (8 x 16): dla każdego pola widzenia najsłabsze z czterech ramion.
+    Jeśli choć jedno ramię nie widzi ruchu na zewnątrz, wynik wynosi 0.
+    """
+    dx = cv2.blur(ruch[..., 0], (4, 4))     # lokalnie uśredniony ruch poziomy
+    dy = cv2.blur(ruch[..., 1], (4, 4))     # lokalnie uśredniony ruch pionowy
+    w, s = dx.shape
 
-def plamki(mapa, rozmiar=ROZMIAR_PLAMKI):
-    """Uśrednia mapę w kwadratach rozmiar x rozmiar (32x64 -> 8x16 plamek)."""
-    w, s = mapa.shape
-    return mapa.reshape(w // rozmiar, rozmiar, s // rozmiar, rozmiar).mean(axis=(1, 3))
+    ys = np.arange(ROZMIAR_PLAMKI // 2, w, ROZMIAR_PLAMKI)[:, None]   # środki pól: wiersze
+    xs = np.arange(ROZMIAR_PLAMKI // 2, s, ROZMIAR_PLAMKI)[None, :]   # środki pól: kolumny
+
+    def probka(mapa, y, x):
+        return mapa[np.clip(y, 0, w - 1), np.clip(x, 0, s - 1)]
+
+    prawo = probka(dx, ys, xs + RAMIE)      # na prawo od środka: ruch w prawo
+    lewo = -probka(dx, ys, xs - RAMIE)      # na lewo od środka: ruch w lewo
+    gora = -probka(dy, ys - RAMIE, xs)      # nad środkiem: ruch w górę
+    dol = probka(dy, ys + RAMIE, xs)        # pod środkiem: ruch w dół
+
+    najslabsze = np.minimum(np.minimum(prawo, lewo), np.minimum(gora, dol))
+    return np.maximum(najslabsze, 0)
 
 
 def przypisz_plamki(mozg, ksztalt_plamek, seed=0):
-    """Każdemu neuronowi LC4/LPLC2 losuje jedną plamkę po jego stronie obrazu.
-
-    Plamki losujemy tylko z górnej części obrazu (CZESC_DO_LOOMINGU): dolna część
-    to ziemia tuż pod samolotem, która "rośnie" przy każdym zwykłym locie.
-    """
+    """Każdemu neuronowi LC4/LPLC2 losuje jedno pole widzenia po jego stronie obrazu."""
     rng = np.random.default_rng(seed)
     wiersze, kolumny = ksztalt_plamek
     wiersze_gora = max(1, int(wiersze * CZESC_DO_LOOMINGU))
@@ -117,6 +127,7 @@ def przypisz_plamki(mozg, ksztalt_plamek, seed=0):
             else:
                 k_idx.append(rng.integers(polowa, kolumny))
     return np.array(indeksy), np.array(w_idx), np.array(k_idx)
+
 
 def ciemnosc(klatka):
     """Ciemność lewej połowy, prawej połowy i całego obrazu (0 = biało, 1 = czarno)."""
@@ -173,11 +184,11 @@ def zmierz_jasnosc_poziomu(oczy, sekundy=1.0):
 
 
 def pokaz_podglad(klatka, pl, stan):
-    """Okno: u góry obraz muszki, na dole mapa narastania, w rogu stan."""
+    """Okno: u góry obraz muszki, na dole mapa LPLC2 (gdzie coś leci prosto na muszkę)."""
     oczy_duze = cv2.resize(klatka, (640, 320), interpolation=cv2.INTER_NEAREST)
     oczy_kolor = cv2.cvtColor(oczy_duze, cv2.COLOR_GRAY2BGR)
 
-    mapa = np.clip((pl - PROG_SZUMU) / DYWERGENCJA_PELNA, 0, 1)
+    mapa = np.clip(pl / 0.05, 0, 1)    # stała skala: widać też aktywność poniżej progu
     mapa_duza = cv2.resize((mapa * 255).astype(np.uint8), (640, 320),
                            interpolation=cv2.INTER_NEAREST)
     mapa_kolor = cv2.applyColorMap(mapa_duza, cv2.COLORMAP_HOT)
@@ -218,7 +229,7 @@ def main():
     oczy = Oczy()
     ksztalt_plamek = (oczy.ksztalt[0] // ROZMIAR_PLAMKI, oczy.ksztalt[1] // ROZMIAR_PLAMKI)
     loom_idx, loom_w, loom_k = przypisz_plamki(mozg, ksztalt_plamek)
-    print(f"Neuronów LC4/LPLC2 z przypisaną plamką: {len(loom_idx)}")
+    print(f"Neuronów LC4/LPLC2 z przypisanym polem widzenia: {len(loom_idx)}")
 
     print("Mierzę jasność w locie poziomym (trzymaj poziom)...")
     ciemnosc_poziomu = zmierz_jasnosc_poziomu(oczy)
@@ -263,9 +274,9 @@ def main():
 
             hz = wejscie(mozg, maski, obrot, pion, ciemn_l, ciemn_p, zmiana)
 
-            # narastanie obrazu: każdy neuron LC4/LPLC2 patrzy na swoją plamkę
-            pl = plamki(dywergencja(ruch))
-            sila = np.clip((pl[loom_w, loom_k] - PROG_SZUMU) / DYWERGENCJA_PELNA, 0, 1)
+            # narastanie obrazu: każdy neuron LC4/LPLC2 patrzy na swoje pole widzenia
+            pl = lplc2(ruch)
+            sila = np.clip((pl[loom_w, loom_k] - PROG_SZUMU) / ROZCHODZENIE_PELNE, 0, 1)
 
             # kopia eferentna: gdy cały obraz się OBRACA, wycisz narastanie
             ruch_wlasny = max(abs(obrot), abs(pion))
@@ -319,8 +330,9 @@ def main():
             except TimeoutError:
                 pass
 
-            print(f"[{stan:10}] {powod:6}  GF: {wygl_gf:5.0f}  tłum.: {tlumienie:.1f}  "
-                  f"Δciem.: {zmiana:+.2f}  |  lotki: {lotki:+.2f}  ster: {ster_wys:+.2f}  |  "
+            aktywne = (sila > 0).mean() * 100
+            print(f"[{stan:10}] {powod:6}  GF: {wygl_gf:5.0f}  LPLC2: {aktywne:4.1f}% (max {pl.max():.3f})  tłum.: {tlumienie:.1f}  "
+                  f"|  lotki: {lotki:+.2f}  ster: {ster_wys:+.2f}  |  "
                   f"phi: {phi:+6.1f}°  theta: {theta:+6.1f}°  wys.: {agl:5.0f} m")
 
             if POKAZ_PODGLAD:
