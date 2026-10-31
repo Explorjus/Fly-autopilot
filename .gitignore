@@ -1,0 +1,16 @@
+# dane z konektomu (duże, można pobrać ponownie)
+data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# środowiska i ustawienia edytora
+.venv/
+.vscode/
